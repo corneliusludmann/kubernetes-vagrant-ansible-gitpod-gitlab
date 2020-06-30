@@ -1,0 +1,76 @@
+apiVersion: k8s.nginx.org/v1
+kind: VirtualServer
+metadata:
+  name: gitlab-gitlab-ingress
+spec:
+  host: gitlab.example.com
+  tls:
+    secret: tls-certs
+  upstreams:
+  - name: gitlab
+    service: gitlab-nginx-ingress-controller
+    port: 443
+    tls:
+      enable: true
+  routes:
+  - path: /
+    action:
+      pass: gitlab
+---
+apiVersion: k8s.nginx.org/v1
+kind: VirtualServer
+metadata:
+  name: gitlab-registry-ingress
+spec:
+  host: registry.example.com
+  tls:
+    secret: tls-certs
+  upstreams:
+  - name: registry
+    service: gitlab-nginx-ingress-controller
+    port: 443
+    tls:
+      enable: true
+  routes:
+  - path: /
+    action:
+      pass: registry
+---
+apiVersion: k8s.nginx.org/v1
+kind: VirtualServer
+metadata:
+  name: gitlab-minio-ingress
+spec:
+  host: minio.example.com
+  tls:
+    secret: tls-certs
+  upstreams:
+  - name: minio
+    service: gitlab-nginx-ingress-controller
+    port: 443
+    tls:
+      enable: true
+  routes:
+  - path: /
+    action:
+      pass: minio
+---
+apiVersion: k8s.nginx.org/v1
+kind: VirtualServer
+metadata:
+  name: gitpod
+spec:
+  host: default
+  tls:
+    secret: tls-certs
+  upstreams:
+  - name: proxy
+    service: proxy
+    port: 443
+    client-max-body-size: 10g
+    tls:
+      enable: true
+  routes:
+  - path: /
+    action:
+      pass: proxy

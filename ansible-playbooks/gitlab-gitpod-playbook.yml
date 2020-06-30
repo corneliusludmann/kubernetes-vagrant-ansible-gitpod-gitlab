@@ -1,0 +1,128 @@
+---
+- hosts: all
+  become: true
+  tasks:
+
+  - name: Set default emphemeral storage
+    command: kubectl apply -f sync/default-emphemeral-storage.yml --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Add TLS cert to kubernetes secrets
+    command: >-
+      kubectl create secret tls tls-certs
+      --cert=sync/gitpod-self-hosted/secrets/https-certificates/fullchain.pem
+      --key=sync/gitpod-self-hosted/secrets/https-certificates/privkey.pem
+      --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Install GitLab
+    shell:
+      cmd: "{{ item }}"
+      executable: /bin/bash
+    with_items:
+      - helm repo add gitlab https://charts.gitlab.io/
+      - >-
+        helm install gitlab gitlab/gitlab
+        --set global.hosts.domain="{{ domain }}"
+        --set certmanager.install=false
+        --set global.ingress.configureCertmanager=false
+        --set global.ingress.tls.secretName=tls-certs
+        --version {{ gitlab_chart_version }}
+        --kubeconfig /etc/kubernetes/admin.conf
+      - >-
+        kubectl patch service gitlab-nginx-ingress-controller
+        -p "$(cat sync/gitlab/gitlab-ingress-patch.yml)"
+        --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Install Gitpod
+    command:
+      cmd: "{{ item }}"
+      chdir: sync/gitpod-self-hosted
+    with_items:
+      - helm repo add charts.gitpod.io https://charts.gitpod.io
+      - helm dep update
+      - >-
+        helm upgrade --install -f values.yaml gitpod .
+        --timeout 60m
+        --set gitpod.hostname=gitpod.{{ domain }}
+        --set gitpod.authProviders[0].host=gitlab.{{ domain }}
+        --set gitpod.authProviders[0].oauth.callBackUrl=https://gitpod.{{ domain }}/auth/gitlab/callback
+        --set gitpod.authProviders[0].oauth.settingsUrl=gitlab.{{ domain }}/profile/applications
+        --kubeconfig /etc/kubernetes/admin.conf
+
+      # We remove the network policy for workspaces because it prevents us from reaching the GitLab repo.
+      # In the future we should fine-tune the policy instead.
+      #- kubectl delete networkpolicies.networking.k8s.io workspace-default --kubeconfig /etc/kubernetes/admin.conf
+
+      # We remove all network policies since there are issues for our setting that need to be fixed in the long term.
+      - kubectl delete networkpolicies.networking.k8s.io --all --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Install NGINX ingress proxy
+    shell:
+      cmd: "{{ item }}"
+      executable: /bin/bash
+    with_items:
+      - helm repo add nginx-stable https://helm.nginx.com/stable
+      - helm install nginx-ingress nginx-stable/nginx-ingress --version {{ nginx_chart_version }} --kubeconfig /etc/kubernetes/admin.conf
+      - >-
+        kubectl patch service nginx-ingress-nginx-ingress
+        -p '{"spec": {"type": "LoadBalancer", "externalIPs":["192.168.50.10"]}}'
+        --kubeconfig /etc/kubernetes/admin.conf
+      - >-
+        kubectl create configmap nginx-ingress-templates
+        --from-file=sync/nginx-ingress-proxy/templates/
+        --kubeconfig /etc/kubernetes/admin.conf
+      - >-
+        kubectl patch deployments.apps nginx-ingress-nginx-ingress
+        -p "$(cat sync/nginx-ingress-proxy/nginx-ingress-patch.yml)"
+        --kubeconfig /etc/kubernetes/admin.conf
+      - >-
+        sed 's+example.com+{{ domain }}+' sync/nginx-ingress-proxy/nginx-virtualservers.yml |
+        kubectl apply -f - --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Wait for GitLab DB (max. 30 min)
+    register: gitlab_db_status
+    command: kubectl get pod gitlab-postgresql-0 -o jsonpath={.status.phase} --kubeconfig /etc/kubernetes/admin.conf
+    retries: 180
+    delay: 10
+    until: gitlab_db_status.stdout.find("Running") != -1
+
+  - name: Wait for GitLab DB migrations (max. 30 min)
+    register: gitlab_db_migration_status
+    shell:
+      cmd: |
+        set -o pipefail
+        kubectl get pods --kubeconfig /etc/kubernetes/admin.conf | grep gitlab-migrations
+      executable: /bin/bash
+    retries: 180
+    delay: 10
+    until: gitlab_db_migration_status.stdout.find("Completed") != -1
+
+  - name: Get GitLab DB password
+    shell:
+      cmd: >-
+        kubectl get secret gitlab-postgresql-password
+        -o jsonpath='{.data.postgresql-postgres-password}'
+        --kubeconfig /etc/kubernetes/admin.conf
+        | base64 --decode
+      executable: /bin/bash
+    register: gitlab_postgres_password
+
+  - name: Add GitLab OAuth config
+    shell:
+      cmd: >-
+        kubectl exec -it gitlab-postgresql-0
+        --kubeconfig /etc/kubernetes/admin.conf
+        -- bash -c "PGPASSWORD={{ gitlab_postgres_password.stdout_lines[0] }}
+        psql -U postgres -d gitlabhq_production
+        -c \"$(sed 's+example.com+{{ domain }}+' sync/gitlab/insert_oauth_application.sql)\""
+      executable: /bin/bash
+
+  - name: Wait until everything is up and running (max. 30 min)
+    register: non_running_pods
+    shell:
+      cmd: |
+        set -o pipefail
+        kubectl get pods --no-headers --kubeconfig /etc/kubernetes/admin.conf | { grep -v -e Running -e Completed || :; }
+      executable: /bin/bash
+    retries: 180
+    delay: 10
+    until: non_running_pods.stdout | length < 1

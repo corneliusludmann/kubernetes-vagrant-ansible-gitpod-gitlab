@@ -1,0 +1,16 @@
+spec:
+  template:
+    spec:
+      containers:
+      - name: nginx-ingress-nginx-ingress
+        volumeMounts:
+        - name: nginx-ingress-templates
+          mountPath: /nginx.tmpl
+          subPath: nginx.tmpl
+        - name: nginx-ingress-templates
+          mountPath: /nginx.virtualserver.tmpl
+          subPath: nginx.virtualserver.tmpl
+      volumes:
+        - name: nginx-ingress-templates
+          configMap:
+            name: nginx-ingress-templates

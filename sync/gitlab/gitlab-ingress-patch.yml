@@ -1,0 +1,19 @@
+spec:
+  type: ClusterIP
+  externalIPs:
+  ports:
+  - name: http
+    port: 80
+    nodePort:
+    protocol: TCP
+    targetPort: http
+  - name: https
+    port: 443
+    nodePort:
+    protocol: TCP
+    targetPort: https
+  - name: gitlab-shell
+    port: 22
+    nodePort:
+    protocol: TCP
+    targetPort: gitlab-shell

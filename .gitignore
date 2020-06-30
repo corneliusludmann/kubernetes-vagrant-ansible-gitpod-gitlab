@@ -1,0 +1,5 @@
+.kube
+.vagrant
+*.log*
+*.pem
+join-command.sh

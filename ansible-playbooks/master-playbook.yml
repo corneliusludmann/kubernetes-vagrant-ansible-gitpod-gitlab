@@ -1,0 +1,71 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - import_tasks: common-tasks.yml
+
+  - name: Initialize the Kubernetes cluster using kubeadm
+    command: >-
+      kubeadm init
+      --apiserver-advertise-address="192.168.50.10"
+      --apiserver-cert-extra-sans="192.168.50.10"
+      --node-name k8s-master
+      --pod-network-cidr=10.200.0.0/16
+      --service-cidr=10.201.0.0/16
+
+  - name: Setup kubeconfig for vagrant user
+    command: "{{ item }}"
+    with_items:
+      - mkdir -p /home/vagrant/.kube
+      - cp -i /etc/kubernetes/admin.conf /home/vagrant/.kube/config
+      - chown vagrant:vagrant /home/vagrant/.kube/config
+
+  - name: Install calico pod network
+    command: "{{ item }}"
+    with_items:
+      - curl -OLsS https://docs.projectcalico.org/v3.13/manifests/calico.yaml
+      - >-
+        sed -i 's+- name: NODENAME+- name: IP_AUTODETECTION_METHOD\n              value: "interface=enp0s8"\n            - name: NODENAME+' calico.yaml
+      - kubectl apply -f calico.yaml --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Install local path provisioner
+    command: "{{ item }}"
+    with_items:
+      - >-
+        kubectl apply
+        -f https://raw.githubusercontent.com/rancher/local-path-provisioner/master/deploy/local-path-storage.yaml
+        --kubeconfig /etc/kubernetes/admin.conf
+      - >-
+        kubectl patch storageclass local-path
+        -p '{"metadata": {"annotations":{"storageclass.kubernetes.io/is-default-class":"true"}}}'
+        --kubeconfig /etc/kubernetes/admin.conf
+
+  - name: Generate join command
+    command: kubeadm token create --print-join-command
+    register: join_command
+
+  - name: Copy join command to local file
+    local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command.sh"
+
+  - name: Install misc packages
+    apt:
+      name:
+        - git
+        - snapd
+
+  - name: Install helm
+    snap:
+      name: helm
+      classic: yes
+
+  - name: Add bash completion for kubectl and helm
+    lineinfile:
+      path: /home/vagrant/.bashrc
+      line: "{{ item }}"
+    with_items:
+      - source <(kubectl completion bash)
+      - source <(helm completion bash)
+
+  handlers:
+  - name: docker status
+    service: name=docker state=started

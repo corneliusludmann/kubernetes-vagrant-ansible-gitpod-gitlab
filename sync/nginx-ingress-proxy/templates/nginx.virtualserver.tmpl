@@ -1,0 +1,156 @@
+{{ range $u := .Upstreams }}
+upstream {{ $u.Name }} {
+    {{ if ne $u.UpstreamZoneSize "0" }}zone {{ $u.Name }} {{ $u.UpstreamZoneSize }};{{ end }}
+
+    {{ if $u.LBMethod }}{{ $u.LBMethod }};{{ end }}
+
+    {{ range $s := $u.Servers }}
+    server {{ $s.Address }} max_fails={{ $u.MaxFails }} fail_timeout={{ $u.FailTimeout }} max_conns={{ $u.MaxConns }};
+    {{ end }}
+
+    {{ if $u.Keepalive }}
+    keepalive {{ $u.Keepalive }};
+    {{ end }}
+}
+{{ end }}
+
+{{ range $sc := .SplitClients }}
+split_clients {{ $sc.Source }} {{ $sc.Variable }} {
+    {{ range $d := $sc.Distributions }}
+    {{ $d.Weight }} {{ $d.Value }};
+    {{ end }}
+}
+{{ end }}
+
+{{ range $m := .Maps }}
+map {{ $m.Source }} {{ $m.Variable }} {
+    {{ range $p := $m.Parameters }}
+    {{ $p.Value }} {{ $p.Result }};
+    {{ end }}
+}
+{{ end }}
+
+{{ $s := .Server }}
+server {
+    listen 80{{ if $s.ProxyProtocol }} proxy_protocol{{ end }}{{ if eq $s.ServerName "default" }} default_server{{ end }};
+
+    server_name {{ if eq $s.ServerName "default" }}_{{ else }}{{ $s.ServerName }}{{ end }};
+
+    {{ with $ssl := $s.SSL }}
+        {{ if $s.TLSPassthrough }}
+    listen unix:/var/lib/nginx/passthrough-https.sock{{ if $ssl.HTTP2 }} http2{{ end }} proxy_protocol;
+    set_real_ip_from unix:;
+    real_ip_header proxy_protocol;
+        {{ else }}
+    listen 443 ssl{{ if $ssl.HTTP2 }} http2{{ end }}{{ if $s.ProxyProtocol }} proxy_protocol{{ end }}{{ if eq $s.ServerName "default" }} default_server{{ end }};
+        {{ end }}
+
+    ssl_certificate {{ $ssl.Certificate }};
+    ssl_certificate_key {{ $ssl.CertificateKey }};
+
+        {{ if $ssl.Ciphers }}
+    ssl_ciphers {{ $ssl.Ciphers }};
+        {{ end }}
+    {{ end }}
+
+    {{ with $s.TLSRedirect }}
+    if ({{ .BasedOn }} = 'http') {
+        return {{ .Code }} https://$host$request_uri;
+    }
+    {{ end }}
+
+    server_tokens "{{ $s.ServerTokens }}";
+
+    {{ range $setRealIPFrom := $s.SetRealIPFrom }}
+    set_real_ip_from {{ $setRealIPFrom }};
+    {{ end }}
+    {{ if $s.RealIPHeader }}
+    real_ip_header {{ $s.RealIPHeader }};
+    {{ end }}
+    {{ if $s.RealIPRecursive }}
+    real_ip_recursive on;
+    {{ end }}
+
+    {{ range $snippet := $s.Snippets }}
+    {{ $snippet }}
+    {{ end }}
+
+    {{ range $l := $s.InternalRedirectLocations }}
+    location {{ $l.Path }} {
+        rewrite ^ {{ $l.Destination }} last;
+    }
+    {{ end }}
+
+    {{ range $e := $s.ErrorPageLocations }}
+    location {{ $e.Name }} {
+        {{ if $e.DefaultType }}
+        default_type "{{ $e.DefaultType }}";
+        {{ end }}
+        {{ range $h := $e.Headers }}
+        add_header {{ $h.Name }} "{{ $h.Value }}" always;
+        {{ end }}
+        # status code is ignored here, using 0
+        return 0 "{{ $e.Return.Text }}";
+    }
+    {{ end }}
+
+    {{ range $l := $s.Locations }}
+    location {{ $l.Path }} {
+        {{ if $l.Internal }}
+        internal;
+        {{ end }}
+        {{ range $snippet := $l.Snippets }}
+        {{ $snippet }}
+        {{ end }}
+
+        {{ with $l.Return }}
+            {{ if $l.DefaultType }}
+        default_type "{{ $l.DefaultType }}";
+            {{ end }}
+        return {{ .Code }} "{{ .Text }}";
+        {{ end }}
+
+        {{ if $l.ProxyPass }}
+            {{ range $e := $l.ErrorPages }}
+        error_page {{ $e.Codes }} {{ if ne 0 $e.ResponseCode }}={{ $e.ResponseCode }}{{ end }} "{{ $e.Name }}";
+            {{ end }}
+
+        proxy_connect_timeout {{ $l.ProxyConnectTimeout }};
+        proxy_read_timeout {{ $l.ProxyReadTimeout }};
+        proxy_send_timeout {{ $l.ProxySendTimeout }};
+        client_max_body_size {{ $l.ClientMaxBodySize }};
+
+            {{ if $l.ProxyMaxTempFileSize }}
+        proxy_max_temp_file_size {{ $l.ProxyMaxTempFileSize }};
+            {{ end }}
+
+        proxy_buffering {{ if $l.ProxyBuffering }}on{{ else }}off{{ end }};
+            {{ if $l.ProxyBuffers }}
+        proxy_buffers {{ $l.ProxyBuffers }};
+            {{ end }}
+            {{ if $l.ProxyBufferSize }}
+        proxy_buffer_size {{ $l.ProxyBufferSize }};
+            {{ end }}
+            {{ if $l.ProxyInterceptErrors }}
+                proxy_intercept_errors on;
+            {{ end }}
+        proxy_http_version 1.1;
+
+        set $default_connection_header {{ if $l.HasKeepalive }}""{{ else }}close{{ end }};
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $vs_connection_header;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_set_header X-Forwarded-Proto {{ with $s.TLSRedirect }}{{ .BasedOn }}{{ else }}$scheme{{ end }};
+
+        proxy_pass {{ $l.ProxyPass }};
+        proxy_next_upstream {{ $l.ProxyNextUpstream }};
+        proxy_next_upstream_timeout {{ $l.ProxyNextUpstreamTimeout }};
+        proxy_next_upstream_tries {{ $l.ProxyNextUpstreamTries }};
+        {{ end }}
+    }
+    {{ end }}
+}

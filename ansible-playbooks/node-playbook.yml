@@ -1,0 +1,16 @@
+---
+- hosts: all
+  become: true
+  tasks:
+  - import_tasks: common-tasks.yml
+
+  # TODO: Use script module instead - https://docs.ansible.com/ansible/latest/modules/script_module.html
+  - name: Copy the join command to server location
+    copy: src=join-command.sh dest=/tmp/join-command.sh mode=0777
+
+  - name: Join the node to cluster
+    command: sh /tmp/join-command.sh
+
+  handlers:
+  - name: docker status
+    service: name=docker state=started
